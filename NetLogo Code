@@ -1,0 +1,274 @@
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; Youth Residency Simulation Model with Multi-Facility & Population Dynamics
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+breed [people person]
+breed [cafes cafe]
+breed [parks park]
+breed [malls mall]
+
+globals [
+  total-population-initial
+  max-cafe-capacity
+  max-park-capacity
+  max-mall-capacity
+  cafe-queue-bad-satisfaction-threshold
+  overall-avg-satisfaction
+  weight-distance weight-popularity weight-queue weight-cost
+  num-cafes-to-build num-parks-to-build num-malls-to-build
+  initial-young-people-ratio
+  new-young-visitors-per-loop
+  visit-threshold-for-residency
+  satisfaction-threshold-for-residency
+  cafe-attraction-distance
+  ;beta
+  total-young-residents-initial
+  total-residents-initial
+  death-count this-year-birth-count
+]
+
+people-own [
+  gender age-group is-employed is-married has-vehicle
+  is-resident current-facility visits-to-current-facility-count
+  satisfaction-from-current-facility-sum total-cafe-visits
+  accumulated-satisfaction-score age
+]
+
+cafes-own [popularity visitors-inside queue-length last-avg-satisfaction cost]
+parks-own [popularity visitors-inside queue-length last-avg-satisfaction cost]
+malls-own [popularity visitors-inside queue-length last-avg-satisfaction cost]
+
+to setup
+  clear-all
+  setup-globals
+  setup-world
+  setup-facilities
+  setup-initial-population
+  set total-young-residents-initial count people with [is-resident and age-group = "young"]
+  set total-residents-initial count people with [is-resident]
+  reset-ticks
+end
+
+to setup-globals
+  set total-population-initial 1000
+  set max-cafe-capacity 50
+  set max-park-capacity 200
+  set max-mall-capacity 500
+  set cafe-queue-bad-satisfaction-threshold 30
+  set weight-distance 0.3
+  set weight-popularity 0.3
+  set weight-queue 0.2
+  set weight-cost 0.2
+  set num-cafes-to-build 7
+  set num-parks-to-build 5
+  set num-malls-to-build 3
+  set initial-young-people-ratio 0.4
+  set new-young-visitors-per-loop 20
+  set visit-threshold-for-residency 5
+  set satisfaction-threshold-for-residency 65
+  set cafe-attraction-distance 25
+  set beta 0.2
+  set death-count 0
+  set this-year-birth-count 0
+end
+
+to setup-world
+  resize-world -50 50 -50 50
+  set-patch-size 5 ; 100m per patch if 5000m x 5000m total area
+end
+
+to setup-facilities
+  create-cafes num-cafes-to-build [
+    set shape "house" set color yellow set popularity 50
+    set visitors-inside 0 set queue-length 0 set cost random-float 100
+    set last-avg-satisfaction 75 setxy random-xcor random-ycor
+  ]
+  create-parks num-parks-to-build [
+    set shape "tree" set color green set popularity 50
+    set visitors-inside 0 set queue-length 0 set cost 0
+    set last-avg-satisfaction 75 setxy random-xcor random-ycor
+  ]
+  create-malls num-malls-to-build [
+    set shape "square" set color violet set popularity 50
+    set visitors-inside 0 set queue-length 0 set cost random-float 200
+    set last-avg-satisfaction 75 setxy random-xcor random-ycor
+  ]
+end
+
+to setup-initial-population
+  create-people total-population-initial [
+    set shape "person" set color gray set is-resident true
+    setxy random-xcor random-ycor
+    set total-cafe-visits 0 set accumulated-satisfaction-score 0
+    set visits-to-current-facility-count 0 set satisfaction-from-current-facility-sum 0
+    set current-facility nobody set age (random 18) + 18
+    assign-characteristics (random-float 1.0 < initial-young-people-ratio)
+  ]
+end
+
+to assign-characteristics [is-young?]
+  ifelse random-float 100 < 55 [set gender "female" set color pink] [set gender "male" set color sky]
+  ifelse is-young? [
+    set age-group "young"
+    set is-employed random-float 100 < 40
+    set is-married random-float 100 < 20
+    set has-vehicle random-float 100 < 30
+  ] [
+    set age-group one-of ["mid" "older"]
+    set is-employed random-float 100 < 60
+    set is-married random-float 100 < 80
+    set has-vehicle random-float 100 < 70
+  ]
+end
+
+to go
+  if ticks >= 10 [ stop ]
+
+  create-people new-young-visitors-per-loop [
+    set shape "person" set color gray set is-resident false
+    set age 18 setxy random-xcor random-ycor
+    set total-cafe-visits 0 set accumulated-satisfaction-score 0
+    set visits-to-current-facility-count 0 set satisfaction-from-current-facility-sum 0
+    set current-facility nobody
+    assign-characteristics true
+  ]
+
+  ask (turtle-set cafes parks malls) [
+    set visitors-inside 0
+    set queue-length 0
+  ]
+
+  ask people with [age-group = "young"] [
+    if random-float 100 < 80 [ choose-and-visit-facility ]
+  ]
+
+  ask cafes [ update-facility-satisfaction max-cafe-capacity ]
+  ask parks [ update-facility-satisfaction max-park-capacity ]
+  ask malls [ update-facility-satisfaction max-mall-capacity ]
+
+  ask people [
+    if not is-resident [ decide-residency ]
+    if not is-resident and age > 40 [
+      die
+      set death-count death-count + 1
+    ]
+  ]
+
+  if ticks mod 12 = 0 [
+    ask people [ set age age + 1 ]
+    let deaths round (count people * 0.05)
+    set death-count deaths
+    let births round (deaths / 2)
+    set this-year-birth-count births
+    create-people births [
+      set shape "person" set color gray set is-resident false set age 18
+      setxy random-xcor random-ycor
+      set current-facility nobody set visits-to-current-facility-count 0
+      set satisfaction-from-current-facility-sum 0
+      set total-cafe-visits 0 set accumulated-satisfaction-score 0
+      assign-characteristics true
+    ]
+  ]
+  tick
+end
+
+to choose-and-visit-facility
+  let all-facilities sort (turtle-set cafes parks malls)  ;; convert agentset to list for foreach
+  let options []
+  foreach all-facilities [ f ->
+    let dist distance f
+    let popularity-score [popularity] of f / 100
+    let queue-ratio [queue-length] of f / ([visitors-inside] of f + 1)
+    let cost-score (100 - [cost] of f) / 100
+    let dist-score ifelse-value (dist <= cafe-attraction-distance) [1 - (dist / cafe-attraction-distance)] [0.01]
+    let q-score 1 - queue-ratio
+    let a-score (weight-popularity * popularity-score) + (weight-distance * dist-score) + (weight-queue * q-score) + (weight-cost * cost-score)
+    if a-score < 0 [ set a-score 0 ]
+    set options lput (list a-score f) options
+  ]
+  let total-weight sum map [i -> item 0 i] options
+  if total-weight > 0 [
+    let r random-float total-weight
+    let cum 0
+    let selected nobody
+    foreach options [ o ->
+      set cum cum + item 0 o
+      if (selected = nobody and r < cum) [ set selected item 1 o ]
+    ]
+    if selected != nobody [
+      move-to selected
+      set current-facility selected
+      ask selected [
+        ifelse visitors-inside < max-cafe-capacity [
+          set visitors-inside visitors-inside + 1
+        ] [
+          set queue-length queue-length + 1
+        ]
+      ]
+    ]
+  ]
+end
+
+to decide-residency
+  if (age-group = "young") and (current-facility != nobody) [
+    set visits-to-current-facility-count visits-to-current-facility-count + 1
+    set satisfaction-from-current-facility-sum satisfaction-from-current-facility-sum + [last-avg-satisfaction] of current-facility
+    if visits-to-current-facility-count >= visit-threshold-for-residency [
+      let avg-sat satisfaction-from-current-facility-sum / visits-to-current-facility-count
+      let prob 1 / (1 + exp (-(beta) * (avg-sat - satisfaction-threshold-for-residency)))
+      if random-float 1.0 < prob [
+        set is-resident true
+        set color green
+      ]
+      set visits-to-current-facility-count 0
+      set satisfaction-from-current-facility-sum 0
+    ]
+  ]
+end
+
+to update-facility-satisfaction [max-capacity]
+  let demand visitors-inside + queue-length
+  set popularity popularity + (demand / 5)
+  if popularity > 100 [ set popularity 100 ]
+  if popularity < 0 [ set popularity 0 ]
+  let sat popularity * 0.7 + random-float 30
+  if queue-length > cafe-queue-bad-satisfaction-threshold [
+    set sat sat * 0.4 * ((random-float 0.4) + 0.6)
+    if sat > 60 [ set sat 60 ]
+    if sat < 0 [ set sat 0 ]
+  ]
+  set last-avg-satisfaction sat
+end
+
+to experiment-best-parameters
+  let best []
+  let best-inc -9999
+  foreach [5 7 9] [ nc ->
+    foreach [3 5 7] [ np ->
+      foreach [2 3 4] [ nm ->
+        foreach [0.2 0.3 0.4] [ wd ->
+          foreach [0.2 0.3 0.4] [ wp ->
+            foreach [0.1 0.2 0.3] [ wq ->
+              set num-cafes-to-build nc
+              set num-parks-to-build np
+              set num-malls-to-build nm
+              set weight-distance wd
+              set weight-popularity wp
+              set weight-queue wq
+              set weight-cost 1 - (wd + wp + wq)
+              setup
+              repeat 10 [ go ]
+              let final count people with [is-resident and age-group = "young"]
+              let diff final - total-young-residents-initial
+              if diff > best-inc [
+                set best (list nc np nm wd wp wq diff)
+                set best-inc diff
+              ]
+            ]
+          ]
+        ]
+      ]
+    ]
+  ]
+  show (word "Best setting: cafes=" item 0 best ", parks=" item 1 best ", malls=" item 2 best ", dist=" item 3 best ", popularity=" item 4 best ", queue=" item 5 best ", increase=" item 6 best)
+end
